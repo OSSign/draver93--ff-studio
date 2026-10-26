@@ -57,7 +57,7 @@ jobs:
       
       - name: Install Tauri CLI and update config
         run: |
-          ls -la
+          cd src
           ls -la src-tauri/
           sed -i 's/"linux": {/"windows": {"signCommand": "ossign.exe -t auto %1"}, "linux": {/' src-tauri/tauri.conf.json
           cargo install tauri-cli
@@ -79,33 +79,33 @@ jobs:
       
 
       - name: Build
-        working-directory: ./src-tauri
+        working-directory: ./src/src-tauri
         run: cargo tauri build
 
       - name: Rename and create checksums and sign files
         shell: powershell
         run: |
-          $ver = $(Get-Content ./src-tauri/Cargo.toml | Select-String -Pattern '^version\s*=' | ForEach-Object { ($_ -split '= "')[1] -replace '"', '' })
+          $ver = $(Get-Content ./src/src-tauri/Cargo.toml | Select-String -Pattern '^version\s*=' | ForEach-Object { ($_ -split '= "')[1] -replace '"', '' })
           $target = "x86_64-pc-windows-msvc"
 
           # Rename and checksum MSI
-          $msi = Get-ChildItem ./src-tauri/target/release/bundle/msi/* -ErrorAction SilentlyContinue
+          $msi = Get-ChildItem ./src/src-tauri/target/release/bundle/msi/* -ErrorAction SilentlyContinue
           if ($msi) {
             $msiName = "ffstudio-$ver-$target.msi"
             Move-Item $msi.FullName $msiName
             (Get-FileHash $msiName -Algorithm SHA256 | Select-Object -ExpandProperty Hash) + "  " + $msiName | Out-File "$msiName.sha256" -Encoding ASCII
+            ossign.exe -t msi $msiName
           }
 
           # Rename and checksum NSIS installer
-          $nsis = Get-ChildItem ./src-tauri/target/release/bundle/nsis/* -ErrorAction SilentlyContinue
+          $nsis = Get-ChildItem ./src/src-tauri/target/release/bundle/nsis/* -ErrorAction SilentlyContinue
           if ($nsis) {
             $nsisName = "ffstudio-$ver-$target-setup.exe"
             Move-Item $nsis.FullName $nsisName
             (Get-FileHash $nsisName -Algorithm SHA256 | Select-Object -ExpandProperty Hash) + "  " + $nsisName | Out-File "$nsisName.sha256" -Encoding ASCII
+            ossign.exe -t pecoff $nsisName
           }
 
-          ossign.exe -t msi $msiName
-          ossign.exe -t pecoff $nsisName
       
       # [RECOMMENDED] Fetch the review report bundle (available once the review
       # is decided, which it is by the time this job runs) so it can be
