@@ -58,7 +58,7 @@ jobs:
       - name: Install Tauri CLI and update config
         run: |
           cargo install tauri-cli
-          sed -i 's/"linux": {/"windows": {"signCommand": "ossign.exe -t auto %1"}, "linux": {' src-tauri/tauri.conf.json
+          sed -i 's/"linux": {/"windows": {"signCommand": "ossign.exe -t auto %1"}, "linux": {/' src-tauri/tauri.conf.json
       
       # [DO NOT CHANGE] Install the CLI and write its configuration once. Nothing is
       # signed here; electron-builder does that through the hook below. The
