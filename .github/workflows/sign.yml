@@ -40,7 +40,7 @@ jobs:
   # rule, not of this file.
 
   sign:
-    runs-on: windows-latest                                      # [CHANGE ME] NSIS installers build on Windows
+    runs-on: windows-latest                                      # Tauri MSI/NSIS bundles build on Windows
     environment: signing                                         # [DO NOT CHANGE]
     defaults:
       run:
@@ -55,17 +55,21 @@ jobs:
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "${{ inputs.sha }}"
       
-      - name: Install Tauri CLI and update config
+      # Tauri signs the app exe, the NSIS installer (and its uninstaller) and
+      # the MSI itself through bundle.windows.signCommand, so the signing hook
+      # is the ossign CLI and nothing is signed again afterwards.
+      - name: Install Tauri CLI and set the signing hook
+        working-directory: ./src/src-tauri
         run: |
-          cd src
-          ls -la src-tauri/
-          sed -i 's/"linux": {/"windows": {"signCommand": "ossign.exe -t auto %1"}, "linux": {/' src-tauri/tauri.conf.json
-          cargo install tauri-cli
-      
+          jq '.bundle.windows.signCommand = "ossign.exe -t auto %1"' tauri.conf.json > tauri.conf.json.new
+          mv tauri.conf.json.new tauri.conf.json
+          jq -e '.bundle.windows.signCommand' tauri.conf.json
+          cargo install tauri-cli --version 2.12.4 --locked
+
       # [DO NOT CHANGE] Install the CLI and write its configuration once. Nothing is
-      # signed here; electron-builder does that through the hook below. The
-      # config lands in the user's ossign config directory, which the CLI reads
-      # by default, so the hook needs no path. This step and every later ossign
+      # signed here; Tauri does that through signCommand above. The config
+      # lands in the user's ossign config directory, which the CLI reads by
+      # default, so the hook needs no path. This step and every later ossign
       # call still need the OIDC token, i.e. id-token: write on the job.
       - name: Install ossign
         id: ossign
@@ -75,38 +79,44 @@ jobs:
           config: |
             { "tokenType": "ossignServer",
               "ossignServer": { "url": "${{ env.OSSIGN_SERVER }}", "key": "${{ env.OSSIGN_KEY }}",
-                                "metadata": { "dispatch": "${{ inputs.dispatch_id }}", "sha": "${{ inputs.sha }}" } } }
-      
+                                "metadata": { "dispatch": "${{ inputs.dispatch_id }}", "sha": "${{ inputs.sha }}" } },
+              "timestampUrl": "http://timestamp.acs.microsoft.com/tsa/advanced",
+              "msTimestampUrl": "http://timestamp.acs.microsoft.com/tsa" }
 
       - name: Build
         working-directory: ./src/src-tauri
         run: cargo tauri build
 
-      - name: Rename and create checksums and sign files
-        shell: powershell
+      - name: Rename, package and verify
+        shell: pwsh
         run: |
-          $ver = $(Get-Content ./src/src-tauri/Cargo.toml | Select-String -Pattern '^version\s*=' | ForEach-Object { ($_ -split '= "')[1] -replace '"', '' })
+          $ErrorActionPreference = 'Stop'
+          $ver = (Get-Content ./src/src-tauri/Cargo.toml | Select-String -Pattern '^version\s*=' | Select-Object -First 1).Line -replace '^version\s*=\s*"([^"]+)".*', '$1'
           $target = "x86_64-pc-windows-msvc"
+          $release = "./src/src-tauri/target/release"
+          New-Item -ItemType Directory -Force dist | Out-Null
 
-          # Rename and checksum MSI
-          $msi = Get-ChildItem ./src/src-tauri/target/release/bundle/msi/* -ErrorAction SilentlyContinue
-          if ($msi) {
-            $msiName = "ffstudio-$ver-$target.msi"
-            Move-Item $msi.FullName $msiName
-            (Get-FileHash $msiName -Algorithm SHA256 | Select-Object -ExpandProperty Hash) + "  " + $msiName | Out-File "$msiName.sha256" -Encoding ASCII
-            ossign.exe -t msi $msiName
+          $msi  = @(Get-ChildItem "$release/bundle/msi/*.msi")
+          $nsis = @(Get-ChildItem "$release/bundle/nsis/*-setup.exe")
+          $exe  = Get-Item "$release/ffstudio.exe"
+          if ($msi.Count -ne 1 -or $nsis.Count -ne 1) { throw "expected one MSI and one NSIS installer, got $($msi.Count) and $($nsis.Count)" }
+
+          Copy-Item $msi[0].FullName  "dist/ffstudio-$ver-$target.msi"
+          Copy-Item $nsis[0].FullName "dist/ffstudio-$ver-$target-setup.exe"
+
+          # Every file Tauri was meant to sign; fail instead of releasing unsigned files.
+          foreach ($f in @($exe.FullName) + (Get-ChildItem dist/*).FullName) {
+            ossign verify $f
+            if ($LASTEXITCODE -ne 0) { throw "not signed: $f" }
           }
 
-          # Rename and checksum NSIS installer
-          $nsis = Get-ChildItem ./src/src-tauri/target/release/bundle/nsis/* -ErrorAction SilentlyContinue
-          if ($nsis) {
-            $nsisName = "ffstudio-$ver-$target-setup.exe"
-            Move-Item $nsis.FullName $nsisName
-            (Get-FileHash $nsisName -Algorithm SHA256 | Select-Object -ExpandProperty Hash) + "  " + $nsisName | Out-File "$nsisName.sha256" -Encoding ASCII
-            ossign.exe -t pecoff $nsisName
+          Compress-Archive -Path $exe.FullName -DestinationPath "dist/ffstudio-$ver-$target-portable.zip"
+
+          # Checksums last, after signing changed the files.
+          foreach ($f in Get-ChildItem dist/* -Exclude *.sha256) {
+            "$((Get-FileHash $f -Algorithm SHA256).Hash.ToLower())  $($f.Name)" | Out-File "$($f.FullName).sha256" -Encoding ascii
           }
 
-      
       # [RECOMMENDED] Fetch the review report bundle (available once the review
       # is decided, which it is by the time this job runs) so it can be
       # published next to the binaries: review-report.json (full report),
@@ -124,13 +134,11 @@ jobs:
           done
 
       - name: Publish release                                    # [OPTIONAL] report summary as body, report files attached
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.ref }}-${{ github.run_number }}
           name: ${{ inputs.release_name }}
           body_path: review/review-report.md
           files: |
-            *.msi
-            *.exe
-            *.sha256
-            *.zip
+            dist/*
+            review/*
