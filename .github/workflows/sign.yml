@@ -87,6 +87,22 @@ jobs:
         working-directory: ./src/src-tauri
         run: cargo tauri build
 
+      # tauri-bundler restores the unsigned, unpatched main binary after each
+      # bundle (bundle.rs), so target/release/ffstudio.exe is unsigned; only
+      # the copies inside the MSI and NSIS installer are signed. Sign a copy
+      # for the portable zip.
+      - name: Copy the portable exe
+        run: |
+          mkdir -p portable
+          cp src/src-tauri/target/release/ffstudio.exe portable/ffstudio.exe
+
+      - name: Sign the portable exe
+        uses: ossign/ossign@main
+        with:
+          installOnly: false
+          # No config needed, the install step already wrote it
+          inputFile: portable/ffstudio.exe
+
       - name: Rename, package and verify
         shell: pwsh
         run: |
@@ -98,13 +114,13 @@ jobs:
 
           $msi  = @(Get-ChildItem "$release/bundle/msi/*.msi")
           $nsis = @(Get-ChildItem "$release/bundle/nsis/*-setup.exe")
-          $exe  = Get-Item "$release/ffstudio.exe"
+          $exe  = Get-Item "portable/ffstudio.exe"
           if ($msi.Count -ne 1 -or $nsis.Count -ne 1) { throw "expected one MSI and one NSIS installer, got $($msi.Count) and $($nsis.Count)" }
 
           Copy-Item $msi[0].FullName  "dist/ffstudio-$ver-$target.msi"
           Copy-Item $nsis[0].FullName "dist/ffstudio-$ver-$target-setup.exe"
 
-          # Every file Tauri was meant to sign; fail instead of releasing unsigned files.
+          # Every file that gets released; fail instead of releasing unsigned files.
           foreach ($f in @($exe.FullName) + (Get-ChildItem dist/*).FullName) {
             ossign verify $f
             if ($LASTEXITCODE -ne 0) { throw "not signed: $f" }
